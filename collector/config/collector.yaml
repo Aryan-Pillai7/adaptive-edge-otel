@@ -7,7 +7,8 @@
 # Processors are layered in and measured one at a time; the per-processor breakdown is
 # recorded in decisions.md (D-018 onward).
 #
-# Layer 1: tail_sampling  (traces)
+# Layer 1: tail_sampling                    (traces)
+# Layer 2: transform + metricstransform     (metrics)
 
 receivers:
   otlp:
@@ -78,6 +79,49 @@ processors:
         probabilistic:
           sampling_percentage: ${env:TAIL_SAMPLING_BASELINE_PCT}
 
+  # --- metrics: kill unbounded cardinality at the edge --------------------
+  # Step A of two. This ONLY deletes the attributes; it does not fix what deleting
+  # them does to the data, which is what metricstransform below is for.
+  #
+  # Note the context: `datapoint`, not `metric`. These attributes live on individual
+  # data points, and a metric-context statement would not see them.
+  transform/strip_cardinality:
+    error_mode: ignore
+    metric_statements:
+      - context: datapoint
+        statements:
+          # Keys mirror HIGH_CARDINALITY_ATTRIBUTES in app/src/edgeapp/telemetry/
+          # instruments.py. If the two lists drift, this silently stops stripping.
+          - delete_key(attributes, "user_id")
+          - delete_key(attributes, "request_id")
+          - delete_key(attributes, "session_id")
+
+  # Step B of two, and NOT optional -- see D-008.
+  #
+  # Deleting an attribute does not merge the series it distinguished. 6,000 data
+  # points that differed only by user_id become 6,000 data points with IDENTICAL
+  # attribute sets, all claiming to be the same time series at the same timestamp.
+  #
+  # MEASURED, not assumed (see D-019). Without this processor, 40 requests produced a
+  # counter reading of 1 instead of 40 -- VictoriaMetrics keeps one sample per
+  # (series, timestamp) and the other 39 are dropped last-write-wins. NOTHING is
+  # logged: not by the Collector, not by VM. The dashboard is simply wrong and no
+  # signal anywhere tells you. That is far more dangerous than the rejection error we
+  # originally expected, and it is why this pairing is mandatory rather than tidy.
+  #
+  # aggregate_labels collapses them properly: label_set is the attributes to KEEP,
+  # everything else is summed away. sum is correct here because both instruments are
+  # monotonic counters -- for a gauge this would need max/mean instead.
+  metricstransform/aggregate:
+    transforms:
+      - include: ^edgeapp\.db\.(queries|timeouts)$
+        match_type: regexp
+        action: update
+        operations:
+          - action: aggregate_labels
+            label_set: [db.system, error.kind]
+            aggregation_type: sum
+
   # LAST before exporters, always. Placed AFTER tail_sampling so it batches only the
   # spans that survived the decision -- batching first would frame data that is about
   # to be discarded.
@@ -129,7 +173,10 @@ service:
       exporters: [otlp_grpc/tempo]
     metrics:
       receivers: [otlp]
-      processors: [memory_limiter, batch]
+      # Order is load-bearing: strip, THEN re-aggregate, THEN batch. Aggregating
+      # before the strip would aggregate over attribute sets that are still distinct
+      # and change nothing.
+      processors: [memory_limiter, transform/strip_cardinality, metricstransform/aggregate, batch]
       exporters: [prometheus_remote_write/victoriametrics]
     logs:
       receivers: [otlp]

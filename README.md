@@ -16,75 +16,72 @@ small enough to run in a few hundred megabytes each.
           └── traces ───▶ Tempo
 ```
 
-> **Status: Phase 3 complete — the workload and the baseline exist.** A real FastAPI
-> service emits all three signals through the Collector, `/simulate/flood` reproduces
-> the incident, and the **"before" numbers are measured and recorded**. The Collector
-> still runs the passthrough config on purpose: that is the control. The smart
-> processors land in Phase 4.
+> **Status: Phase 4 complete — the smart pipeline is live and measured.**
 
-## The "before" baseline
+## The result
 
-One 30s flood — 500 identical log records/sec plus 200 unique metric label values/sec
-— with 10 req/s of normal traffic alongside it, through the **passthrough** Collector:
+One 30-second flood — **15,000 identical log records** and **6,000 unique metric label
+values** — with normal traffic alongside it, run through the same stack twice. The only
+difference is the Collector's processor chain.
 
-| Measure                        | Passthrough (before) |
-|--------------------------------|----------------------|
-| Log records accepted → sent    | 15,232 → 15,232      |
-| Metric points accepted → sent  | 33,549 → 33,549      |
-| Spans accepted → sent          | 1,311 → 1,311        |
-| New metric series in VM        | ~6,500               |
-| ...of which from one label     | ~6,013               |
-| Loki lines stored              | 15,233               |
-| **Reduction**                  | **0.0% on all three** |
+| Measure                     | Passthrough | Smart pipeline | Change |
+|-----------------------------|-------------|----------------|--------|
+| Log records to storage      | 15,232      | **25**         | **-99.8%** |
+| Metric points to storage    | 33,549      | **161**        | **-99.5%** |
+| Spans to storage            | 1,311       | **212**        | **-86.6%** |
+| Metric series created       | 6,501       | **261**        | -96%   |
+| ...from one unbounded label | 6,013       | **2**          | -99.97% |
+| Loki memory                 | 109 MiB     | **44 MiB**     | -60%   |
+| VictoriaMetrics memory      | 88 MiB      | **48 MiB**     | -45%   |
 
-Zero reduction is the *correct* result here — passthrough is the control arm. Phase 4
-runs the identical flood through the smart pipeline and fills in the second column.
+Reproduce either arm with `bash scripts/measure.sh`; switch between them with
+`COLLECTOR_CONFIG` in `.env`.
 
-Reproduce it with `bash scripts/measure.sh`. Numbers agree within ~2% across three
-clean runs; the exact profile they are pinned to is recorded alongside them, because
-a reduction percentage means nothing without the flood that produced it.
+### Reduction is the easy part. Not lying is the hard part.
 
-### The finding that surprised us
+Any pipeline can hit 99% by throwing data away. Each layer was verified to preserve
+what the discarded data was telling you:
 
-Running the same flood twice in one process reported **34,253** metric points and then
-**120,949**. The SDK uses cumulative temporality, so every export cycle re-sends every
-series the process has ever created — the second flood inherited the first's 6,000
-series and kept re-exporting them every 10 seconds.
+| Layer | What it did | Proof it did not just delete things |
+|-------|-------------|--------------------------------------|
+| `tail_sampling` | 90.6% fewer spans | App served **13** errors; **13** kept. 100% of errors, 100% of slow traces, ~6% of healthy |
+| `transform` + `metrics_transform` | 6,013 series → 2 | Counter still reads **6,011** — the exact event count |
+| `log_dedup` | 15,000 records → 6 | `dedup_count` sums to **15,001** — you can still ask "how often?" |
+| `filter` | 260 INFO dropped | **23 ERROR + 2 WARN survived, zero errors lost** |
 
-High cardinality is not only a storage cost. It **multiplies export volume on every
-interval, for the entire life of the process**. That is the strongest argument for
-killing it at the edge, and it is why `measure.sh` resets the stack before every run.
+### Per-processor breakdown
 
-## Verify it works
+Each processor moves exactly one signal and leaves the others flat, which is how we
+know each number is attributable rather than an artefact:
 
-```bash
-bash scripts/up.sh                # start the pipeline
-bash scripts/verify-pipeline.sh   # THE GATE: prove all 3 signals reach storage
-```
+| Layer added | spans | metric points | log records |
+|-------------|-------|---------------|-------------|
+| (passthrough control) | 0.0% | 0.0% | 0.0% |
+| + `tail_sampling` | **90.6%** | 0.0% | 0.0% |
+| + `transform` + `metrics_transform` | 90.3% | **99.5%** | 0.0% |
+| + `log_dedup` | 91.0% | 99.5% | **98.6%** |
+| + `filter` severity floor | 86.6% | 99.5% | **99.8%** |
 
-`verify-pipeline.sh` emits a burst of traces, metrics and logs tagged with a unique
-`run_id`, then queries each backend until it finds them. It asserts on **data**, not
-on process health — a green `smoke.sh` only means the containers are alive. It also
-checks the Collector's own `otelcol_receiver_accepted_*` counters, since the Phase 4
-measurement is read from them.
+Span reduction moves between 86-91% run to run because the sampler keeps 100% of
+errors and slow traces, and their share of random traffic varies. That movement is the
+sampler working, not noise in the harness.
 
-It is negative-tested: stop a backend and the gate reports that signal missing, runs
-the remaining checks anyway, and exits non-zero.
+## Two things worth stealing from this repo
 
-## Storage footprint (idle)
+**1. Stripping a metric label without re-aggregating loses data silently.**
+The obvious fix for high cardinality is to delete the offending attribute. Do only
+that, and the data points that used to be distinct become identical — same series,
+same timestamp. VictoriaMetrics keeps one and drops the rest. Measured here: **40
+requests read back as a counter value of 1**, with *nothing* logged by the Collector
+or by VM. `transform` must always be paired with `metrics_transform`
+(`aggregate_labels`). We expected a noisy rejection error; the reality is worse.
 
-The whole premise is that backends stay small. Starting point, no telemetry flowing:
-
-| Backend         | Idle RSS    | Budget  |
-|-----------------|-------------|---------|
-| VictoriaMetrics | ~7 MiB      | 200 MiB |
-| Loki            | ~34 MiB     | 200 MiB |
-| Tempo           | ~17 MiB     | 200 MiB |
-| **Total**       | **~58 MiB** | 600 MiB |
-
-`scripts/smoke.sh` re-checks these on every run and **fails if any backend exceeds its
-budget** — an over-budget backend means the pipeline upstream isn't doing its job, so
-it's treated as a test failure rather than a number to quietly raise.
+**2. Cardinality compounds through export volume, not just storage.**
+Running the same flood twice in one process reported **34,253** then **120,949** metric
+points. The SDK uses cumulative temporality, so every export cycle re-sends every
+series the process has ever created. Unbounded cardinality does not just cost disk —
+it multiplies egress **on every interval, for the life of the process**. That is the
+real argument for killing it at the edge.
 
 ## Requirements
 
@@ -155,7 +152,7 @@ bash scripts/measure.sh       # run a flood and record the reduction numbers
 | 1     | Storage backends standalone, each under 200MB idle            | ✅ |
 | 2     | Collector plumbing verified end to end with `telemetrygen`    | ✅ |
 | 3     | Real microservice + flood endpoint, **before** baseline       | ✅ |
-| 4     | Smart processors: tail sampling, cardinality strip, log dedup | ⬜ |
+| 4     | Smart processors: tail sampling, cardinality strip, log dedup | ✅ |
 | 5     | Integration tests + CI hardening                              | ⬜ |
 | 6     | Docs and the before/after report                              | ⬜ |
 

@@ -10,6 +10,7 @@
 # Layer 1: tail_sampling                    (traces)
 # Layer 2: transform + metrics_transform    (metrics)
 # Layer 3: log_dedup                        (logs)
+# Layer 4: filter (severity floor)          (logs)
 
 receivers:
   otlp:
@@ -123,6 +124,28 @@ processors:
             label_set: [db.system, error.kind]
             aggregation_type: sum
 
+  # --- logs: drop what nobody will read -----------------------------------
+  # A severity floor. DEBUG and INFO records are the bulk of steady-state log volume
+  # and are almost never read once a request has succeeded -- the trace already says
+  # what happened, in less space and with structure.
+  #
+  # Placed BEFORE log_dedup deliberately: dropping is cheaper than deduplicating, so
+  # there is no reason to buffer and hash records that are about to be discarded.
+  #
+  # Kept at INFO-and-below rather than anything more aggressive because this is the
+  # crude half of the log strategy (D-007). Filtering on severity is a blunt proxy
+  # for "is this worth keeping"; it will discard a useful INFO line, and it cannot
+  # discard a useless ERROR one. That trade is accepted and stated, not hidden.
+  #
+  # error_mode: ignore so a record with no severity set does not fail the pipeline --
+  # it simply does not match, and is kept. Failing open is right here: dropping logs
+  # because of a parse error would be the worst possible outcome.
+  filter/severity_floor:
+    error_mode: ignore
+    logs:
+      log_record:
+        - severity_number < SEVERITY_NUMBER_WARN
+
   # --- logs: collapse the duplicate storm ---------------------------------
   # The flood emits thousands of BYTE-IDENTICAL records: one pool-exhaustion message
   # per in-flight request. Every one of them is stored, indexed and paid for, and
@@ -205,6 +228,6 @@ service:
       exporters: [prometheus_remote_write/victoriametrics]
     logs:
       receivers: [otlp]
-      # log_dedup before batch: dedup first so batching frames only the survivors.
-      processors: [memory_limiter, log_dedup, batch]
+      # Order: drop cheap, then dedup what survives, then batch the remainder.
+      processors: [memory_limiter, filter/severity_floor, log_dedup, batch]
       exporters: [otlp_http/loki]

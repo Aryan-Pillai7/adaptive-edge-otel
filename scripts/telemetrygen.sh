@@ -45,10 +45,19 @@ for sig in "${SIGNALS[@]}"; do
     --otlp-attributes "run_id=\"$RUN_ID\""
     --rate 0
   )
+  # The generated telemetry is deliberately shaped to SURVIVE the smart pipeline's
+  # policies, so this script verifies plumbing identically on both arms.
+  #
+  # With defaults it would not: telemetrygen emits Info-severity logs, which the
+  # severity floor drops by design, and status-unset traces, which the sampler keeps
+  # only ~5% of. The gate would then fail on a pipeline that is working perfectly --
+  # or worse, pass intermittently depending on the sampler's coin flips.
+  #
+  # Use scripts/measure.sh, not this script, to observe what the policies discard.
   case "$sig" in
-    traces)  args+=(--traces "$COUNT") ;;
+    traces)  args+=(--traces "$COUNT" --status-code Error) ;;
     metrics) args+=(--metrics "$COUNT" --metric-type Sum) ;;
-    logs)    args+=(--logs "$COUNT") ;;
+    logs)    args+=(--logs "$COUNT" --severity-text Error --severity-number 17) ;;
   esac
 
   info "generating $sig"

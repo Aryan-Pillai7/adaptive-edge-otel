@@ -221,6 +221,7 @@ __marimo__/
 CLAUDE.md
 plan.md
 decisions.md
+explanation.md
 
 # Local compose env + runtime state
 .env

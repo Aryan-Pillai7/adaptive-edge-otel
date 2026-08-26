@@ -8,7 +8,8 @@
 # recorded in decisions.md (D-018 onward).
 #
 # Layer 1: tail_sampling                    (traces)
-# Layer 2: transform + metricstransform     (metrics)
+# Layer 2: transform + metrics_transform    (metrics)
+# Layer 3: log_dedup                        (logs)
 
 receivers:
   otlp:
@@ -112,7 +113,7 @@ processors:
   # aggregate_labels collapses them properly: label_set is the attributes to KEEP,
   # everything else is summed away. sum is correct here because both instruments are
   # monotonic counters -- for a gauge this would need max/mean instead.
-  metricstransform/aggregate:
+  metrics_transform/aggregate:
     transforms:
       - include: ^edgeapp\.db\.(queries|timeouts)$
         match_type: regexp
@@ -121,6 +122,30 @@ processors:
           - action: aggregate_labels
             label_set: [db.system, error.kind]
             aggregation_type: sum
+
+  # --- logs: collapse the duplicate storm ---------------------------------
+  # The flood emits thousands of BYTE-IDENTICAL records: one pool-exhaustion message
+  # per in-flight request. Every one of them is stored, indexed and paid for, and
+  # together they say exactly what one of them says plus a count.
+  #
+  # log_dedup buffers over `interval`, collapses records whose body AND attributes
+  # match exactly, and emits one survivor carrying the occurrence count. Nothing is
+  # silently discarded -- the count attribute preserves the magnitude, which is the
+  # part that actually matters during an incident.
+  #
+  # IMPORTANT LIMITATION (D-007): this is a HEURISTIC. It cannot know whether a log
+  # belongs to a trace that was sampled away, because tail_sampling is traces-only and
+  # there is no built-in way to hold logs pending a trace decision. Trace reduction
+  # here is decision-based; log reduction is not. Documented, not papered over.
+  log_dedup:
+    # Long enough to catch a burst, short enough that an operator watching a live tail
+    # is not left staring at nothing. A record is delayed by at most this long.
+    interval: 10s
+    # Where the occurrence count lands. Without it, dedup would be lossy in the way
+    # that matters: "this happened" reads identically whether it happened twice or
+    # fifteen thousand times.
+    log_count_attribute: dedup_count
+    timezone: UTC
 
   # LAST before exporters, always. Placed AFTER tail_sampling so it batches only the
   # spans that survived the decision -- batching first would frame data that is about
@@ -176,9 +201,10 @@ service:
       # Order is load-bearing: strip, THEN re-aggregate, THEN batch. Aggregating
       # before the strip would aggregate over attribute sets that are still distinct
       # and change nothing.
-      processors: [memory_limiter, transform/strip_cardinality, metricstransform/aggregate, batch]
+      processors: [memory_limiter, transform/strip_cardinality, metrics_transform/aggregate, batch]
       exporters: [prometheus_remote_write/victoriametrics]
     logs:
       receivers: [otlp]
-      processors: [memory_limiter, batch]
+      # log_dedup before batch: dedup first so batching frames only the survivors.
+      processors: [memory_limiter, log_dedup, batch]
       exporters: [otlp_http/loki]

@@ -1,10 +1,15 @@
-# CI is scoped to checks that would actually have caught a real break.
+# CI is scoped to checks that would actually have caught a real break in this repo.
 #
-# Phase 0 runs lint + Collector config validation only. The value of the second one
-# is specific: a malformed processor config fails at container start, not at commit
-# time, and "the pipeline silently stopped exporting" is the exact failure mode this
-# project exists to prevent. Unit and integration jobs are added in Phase 5 when
-# there is something to run.
+# Three jobs, cheapest first, because feedback speed matters more than completeness
+# on the common path:
+#
+#   lint        seconds   — yaml, ruff, shellcheck
+#   unit        seconds   — the service in isolation, no Docker
+#   pipeline    minutes   — the whole stack up, telemetry flowing end to end
+#
+# The last one is the expensive one, and it is the only one that can catch a
+# Collector config that is valid YAML, accepted by the binary, and still silently
+# routes nothing anywhere.
 
 name: ci
 
@@ -13,7 +18,6 @@ on:
     branches: [main]
   pull_request:
 
-# A second push should cancel the first run rather than queue behind it.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -30,7 +34,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"   # matches the lowest supported local interpreter
+          python-version: "3.11"   # the lowest interpreter we support locally
 
       - name: install lint deps
         run: |
@@ -41,13 +45,90 @@ jobs:
       - name: lint
         run: bash scripts/lint.sh
 
+  unit:
+    name: unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: app/pyproject.toml
+
+      - name: install app
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e "app[dev]"
+
+      # Runs on 3.11 while the container image pins 3.13. That difference is
+      # deliberate: it is the combination the primary dev machine actually uses, and
+      # a version-specific break should fail here rather than in someone's editor.
+      - name: unit tests
+        run: python -m pytest app/tests -q
+
   collector-config:
     name: validate collector config
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      # Uses the pinned image from .env.example, so CI validates against exactly the
-      # binary the stack runs. A version bump that breaks a processor fails here.
+      # Runs the real pinned otelcol binary, not a schema check. Only the binary knows
+      # whether a processor exists in this build and whether its settings parse -- and
+      # a bad processor config fails at container start, not at commit time.
       - name: validate
         run: bash scripts/validate.sh
+
+  pipeline:
+    name: pipeline integration
+    runs-on: ubuntu-latest
+    # No point burning several minutes of stack time on a branch that does not lint
+    # or whose unit tests are already failing.
+    needs: [lint, unit, collector-config]
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: app/pyproject.toml
+
+      - name: install test deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e "app[dev]"
+
+      - name: start the stack
+        run: bash scripts/up.sh
+
+      # The Phase 2 gate: emits all three signals and proves each reaches its own
+      # backend. Runs before the test suite because if this fails, every integration
+      # failure after it is just noise from the same root cause.
+      - name: pipeline gate
+        run: bash scripts/verify-pipeline.sh
+
+      - name: integration tests
+        # Runners are slower and noisier than a laptop, and every assertion here is
+        # already waiting on a buffer somewhere.
+        env:
+          INTEGRATION_TIMEOUT: "180"
+        run: python -m pytest test -q -rs
+
+      # Logs from every container, on failure only. Debugging a pipeline failure
+      # without them means guessing at which of five components broke.
+      - name: dump container logs
+        if: failure()
+        run: |
+          docker compose ps
+          for c in aeo-collector aeo-app aeo-victoriametrics aeo-loki aeo-tempo; do
+            echo "::group::$c"
+            docker logs --tail 200 "$c" 2>&1 || true
+            echo "::endgroup::"
+          done
+
+      - name: tear down
+        if: always()
+        run: bash scripts/down.sh --clean

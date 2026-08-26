@@ -118,6 +118,8 @@ bash scripts/logs.sh loki     # tail logs, optionally for one service
 bash scripts/telemetrygen.sh  # drive synthetic telemetry through the pipeline
 bash scripts/load.sh          # drive steady-state request traffic at the app
 bash scripts/measure.sh       # run a flood and record the reduction numbers
+bash scripts/test.sh          # unit tests, then pipeline integration tests
+bash scripts/test.sh unit     # unit only — fast, no Docker needed
 ```
 
 ### Ports
@@ -153,8 +155,27 @@ bash scripts/measure.sh       # run a flood and record the reduction numbers
 | 2     | Collector plumbing verified end to end with `telemetrygen`    | ✅ |
 | 3     | Real microservice + flood endpoint, **before** baseline       | ✅ |
 | 4     | Smart processors: tail sampling, cardinality strip, log dedup | ✅ |
-| 5     | Integration tests + CI hardening                              | ⬜ |
+| 5     | Integration tests + CI hardening                              | ✅ |
 | 6     | Docs and the before/after report                              | ⬜ |
+
+## Tests
+
+| Suite | What it covers | Needs a stack? |
+|-------|----------------|----------------|
+| `app/tests/` | The service in isolation, via in-memory OTel exporters. Asserts on *emitted telemetry*, not HTTP responses — an instrument that silently stops recording is the failure this project exists to surface. | No |
+| `test/` | The pipeline. Asserts on what actually landed in VictoriaMetrics, Loki and Tempo, and that the processors reshaped it correctly. | Yes |
+
+```bash
+bash scripts/test.sh          # both
+bash scripts/test.sh unit     # fast loop
+```
+
+The integration tests are **arm-aware**: the running Collector config is read from the
+container, so a test can never assert smart-pipeline behaviour against a config that
+isn't loaded. Smart-only tests skip on the passthrough arm with a stated reason.
+
+Most of them assert on what **survived**, not on how much was removed — reduction is
+trivially gameable, and a pipeline that deletes everything scores 100%.
 
 ## A stated limitation
 

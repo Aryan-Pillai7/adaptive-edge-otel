@@ -9,6 +9,11 @@
 # small; if a backend exceeds budget the claim is failing, so the smoke test fails
 # with it rather than reporting a green stack.
 
+# Tells shellcheck -x where to find the sourced file. The path is built at
+# runtime, so without this it looks for ./lib.sh relative to the CWD, fails to
+# find it, and emits SC1091 -- which is only "info" severity but still exits
+# non-zero and fails the lint.
+# shellcheck source-path=SCRIPTDIR
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 need docker
 ensure_env

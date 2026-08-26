@@ -9,6 +9,11 @@
 # must stay fast enough to run on every save; integration tests need the whole stack
 # and take minutes. Merging them would make the fast feedback loop slow.
 
+# Tells shellcheck -x where to find the sourced file. The path is built at
+# runtime, so without this it looks for ./lib.sh relative to the CWD, fails to
+# find it, and emits SC1091 -- which is only "info" severity but still exits
+# non-zero and fails the lint.
+# shellcheck source-path=SCRIPTDIR
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 ensure_env
 load_env

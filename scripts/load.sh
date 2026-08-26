@@ -13,6 +13,11 @@
 # 500s and slow responses, giving the sampler all three of its cases (error, slow,
 # healthy) instead of only the one it samples down.
 
+# Tells shellcheck -x where to find the sourced file. The path is built at
+# runtime, so without this it looks for ./lib.sh relative to the CWD, fails to
+# find it, and emits SC1091 -- which is only "info" severity but still exits
+# non-zero and fails the lint.
+# shellcheck source-path=SCRIPTDIR
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 need curl
 ensure_env

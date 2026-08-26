@@ -7,6 +7,11 @@
 # Volumes are kept by default so a restart does not silently discard the telemetry
 # a measurement run just produced.
 
+# Tells shellcheck -x where to find the sourced file. The path is built at
+# runtime, so without this it looks for ./lib.sh relative to the CWD, fails to
+# find it, and emits SC1091 -- which is only "info" severity but still exits
+# non-zero and fails the lint.
+# shellcheck source-path=SCRIPTDIR
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 need docker
 ensure_env

@@ -78,9 +78,7 @@ async def get_order(order_id: str, request: Request) -> dict:
     span.set_attribute("user_id", user_id)
 
     try:
-        await _simulated_db_query(
-            instruments, user_id, slow=slow, slow_ms=settings.app_slow_ms
-        )
+        await _simulated_db_query(instruments, user_id, slow=slow, slow_ms=settings.app_slow_ms)
 
         if fail:
             # Logged at ERROR with the trace context attached by the OTel logging

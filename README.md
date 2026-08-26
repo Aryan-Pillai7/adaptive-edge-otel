@@ -66,6 +66,43 @@ Span reduction moves between 86-91% run to run because the sampler keeps 100% of
 errors and slow traces, and their share of random traffic varies. That movement is the
 sampler working, not noise in the harness.
 
+## The bug we hit six times
+
+Three separate tools in this repo — `measure.sh`, `verify-pipeline.sh`, and the
+integration suite — independently hit the **same class of bug**, found at three
+different points in the project:
+
+| Symptom | Cause |
+|---------|-------|
+| Identical floods measured 34,253 then **120,949** metric points | Cumulative temporality re-exports every series the process ever created |
+| Smart arm credited with the control's 6,013 series | Cumulative count reported instead of a delta |
+| **59** log records stored for **50** emitted | Rolling Loki window caught the *other arm's* records |
+| **364** series counted; true live count was **2** | VM ignores `start`/`end` on `/api/v1/series` |
+| Partial dedup total asserted | Polled for *any* record, not the *full* count |
+| A genuine increase read as no increase | `max()` compared against a pre-restart high-water mark |
+
+One pattern:
+
+> **A measurement that does not bound its window measures history, not the present.**
+
+This is an operating lesson, not a testing footnote:
+
+- **Observability backends are append-only and long-retention by design.** So the
+  default behaviour of nearly every query is to include the past — and the past includes
+  the state you were trying to change.
+- **Every failure was silent and directionally encouraging.** No errors. Plausible
+  numbers. Several made the pipeline look *better* than it was, which is the direction
+  you are least likely to question.
+- **It bites hardest exactly when you validate a fix.** "Did stripping the label work?"
+  is answered by counting series. Count them unbounded and you see pre-fix cardinality
+  for the entire retention window, conclude the fix failed, and revert a change that was
+  working. Our own integration test asserted "cardinality is not bounded" against a
+  pipeline that was bounding it perfectly.
+
+The rules we adopted are in
+[ADR-0007](docs/adr/0007-measurement-methodology.md); the VictoriaMetrics-specific
+footguns are in [`storage/victoriametrics/README.md`](storage/victoriametrics/README.md).
+
 ## Two things worth stealing from this repo
 
 **1. Stripping a metric label without re-aggregating loses data silently.**
@@ -76,7 +113,15 @@ requests read back as a counter value of 1**, with *nothing* logged by the Colle
 or by VM. `transform` must always be paired with `metrics_transform`
 (`aggregate_labels`). We expected a noisy rejection error; the reality is worse.
 
-**2. Cardinality compounds through export volume, not just storage.**
+**2. `/api/v1/series` in VictoriaMetrics ignores `start` and `end`.**
+It accepts them without complaint and returns every series in the retention window
+regardless. Measured: 60s, 300s, 3600s and no-window all returned the same 364 series,
+while `count()` over 120s correctly returned 2. Any "how many series does this metric
+have right now?" check — a cardinality alert, a capacity review, a post-incident "did
+the fix work?" — will read the retention window instead of the present. Count series
+with `count()` over `query_range`, never with `/api/v1/series`.
+
+**3. Cardinality compounds through export volume, not just storage.**
 Running the same flood twice in one process reported **34,253** then **120,949** metric
 points. The SDK uses cumulative temporality, so every export cycle re-sends every
 series the process has ever created. Unbounded cardinality does not just cost disk —
@@ -134,6 +179,15 @@ bash scripts/test.sh unit     # unit only — fast, no Docker needed
 | 3200   | Tempo **query API only** — its OTLP ports stay network-internal so they don't collide with the Collector |
 | 8000   | The mock microservice                                 |
 | 3000   | Grafana (`--profile ui` only)                         |
+
+## Documentation
+
+| Doc | What's in it |
+|-----|--------------|
+| [docs/architecture.md](docs/architecture.md) | The system in depth — the problem, where to intervene, each processor, the measurement methodology |
+| [docs/adr/](docs/adr/) | Seven decision records: what we chose, what we rejected, and where we later measured ourselves wrong |
+| [collector/config/collector.yaml](collector/config/collector.yaml) | The smart pipeline, commented with *why* each processor sits where it does |
+| [storage/victoriametrics/README.md](storage/victoriametrics/README.md) | VM query footguns — three ways to get a plausible, silently wrong answer |
 
 ## Layout
 

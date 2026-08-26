@@ -37,7 +37,9 @@ def _status_class(code: int) -> str:
     return f"{code // 100}xx"
 
 
-async def _simulated_db_query(instruments: Instruments, user_id: str, *, slow: bool) -> None:
+async def _simulated_db_query(
+    instruments: Instruments, user_id: str, *, slow: bool, slow_ms: int = 800
+) -> None:
     """A child span so traces have depth, plus the high-cardinality metric.
 
     `user_id` on a metric attribute is the cardinality bomb -- one new time series per
@@ -52,7 +54,11 @@ async def _simulated_db_query(instruments: Instruments, user_id: str, *, slow: b
         # completely different cost -- which is exactly why Phase 4 strips them from
         # metrics only.
         span.set_attribute("user_id", user_id)
-        await asyncio.sleep(0.25 if slow else random.uniform(0.002, 0.02))
+        # slow_ms comes from config and MUST stay above the tail sampler's latency
+        # threshold (TAIL_SAMPLING_SLOW_THRESHOLD_MS). If a "slow" request finishes
+        # faster than the threshold, the latency policy never fires and the sampling
+        # config looks correct while silently keeping nothing.
+        await asyncio.sleep(slow_ms / 1000 if slow else random.uniform(0.002, 0.02))
         instruments.db_query_total.add(1, {"user_id": user_id, "db.system": "postgresql"})
 
 
@@ -72,7 +78,9 @@ async def get_order(order_id: str, request: Request) -> dict:
     span.set_attribute("user_id", user_id)
 
     try:
-        await _simulated_db_query(instruments, user_id, slow=slow)
+        await _simulated_db_query(
+            instruments, user_id, slow=slow, slow_ms=settings.app_slow_ms
+        )
 
         if fail:
             # Logged at ERROR with the trace context attached by the OTel logging

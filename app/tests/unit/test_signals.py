@@ -189,3 +189,28 @@ class TestFloodEndpoint:
 
         assert len(flood_bodies) >= 10
         assert len(set(flood_bodies)) == 1, "flood log records must be identical for logdedup"
+
+
+class TestSamplingPreconditions:
+    """Guards on the assumptions the Phase 4 tail-sampling policies depend on.
+
+    Each of these can break without any test failing elsewhere, and the symptom would
+    be a sampling policy that looks right in the config while matching nothing.
+    """
+
+    def test_slow_requests_exceed_the_sampler_latency_threshold(self):
+        """A 'slow' request must actually be slower than the latency policy's threshold.
+
+        If app_slow_ms drops below TAIL_SAMPLING_SLOW_THRESHOLD_MS, the latency policy
+        silently keeps zero traces and the reduction number looks better than it is.
+        """
+        settings = Settings()
+        threshold_ms = 500  # TAIL_SAMPLING_SLOW_THRESHOLD_MS default in .env.example
+        assert settings.app_slow_ms > threshold_ms
+
+    def test_error_rate_is_non_zero_by_default(self):
+        """The sampler keeps 100% of errors; a zero error rate makes that untestable."""
+        assert Settings().app_error_rate > 0
+
+    def test_slow_rate_is_non_zero_by_default(self):
+        assert Settings().app_slow_rate > 0

@@ -1,0 +1,137 @@
+# The smart pipeline -- the "after" arm.
+#
+# Same receivers, same exporters and the same backends as collector.passthrough.yaml.
+# The ONLY difference is the processor chain, so any measured difference between the
+# two arms is attributable to processing and nothing else.
+#
+# Processors are layered in and measured one at a time; the per-processor breakdown is
+# recorded in decisions.md (D-018 onward).
+#
+# Layer 1: tail_sampling  (traces)
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # FIRST in every pipeline, always.
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: ${env:COLLECTOR_MEMORY_LIMIT_MIB}
+    spike_limit_mib: ${env:COLLECTOR_MEMORY_SPIKE_MIB}
+
+  # --- traces: decide what is worth keeping -------------------------------
+  # Tail sampling, not head sampling: the decision is made once the WHOLE trace has
+  # arrived, so it can be based on how the request actually ended. A head sampler has
+  # to decide at the first span, before it knows whether the request failed or was
+  # slow -- which is precisely when you would want to keep it.
+  #
+  # Policies are OR'd: a trace is kept if ANY policy votes to sample it.
+  #
+  # NOTE ON SCALE: this requires every span of a trace to reach the SAME collector
+  # instance. Fine at one instance; scaling out would need a `loadbalancing` exporter
+  # tier in front, routing by trace ID.
+  tail_sampling:
+    # How long to hold a trace before deciding. Must exceed the slowest request the
+    # app can produce, or slow traces get judged on an incomplete set of spans -- the
+    # exact traces the latency policy exists to keep.
+    decision_wait: ${env:TAIL_SAMPLING_DECISION_WAIT}
+    num_traces: 50000
+    expected_new_traces_per_sec: 200
+    policies:
+      # (1) Keep every error. Non-negotiable: errors are the reason the system is
+      # instrumented at all, and they are rare enough that keeping 100% is cheap.
+      - name: keep-all-errors
+        type: status_code
+        status_code:
+          status_codes: [ERROR]
+
+      # (2) Belt and braces on (1). The span status is set by the instrumentation,
+      # but a 5xx that somehow left status unset would still be caught here.
+      # The key is `http.status_code` (OLD semconv) -- this instrumentation does not
+      # emit `http.response.status_code`, and a policy on that key would silently
+      # match nothing while looking perfectly correct.
+      - name: keep-all-5xx
+        type: numeric_attribute
+        numeric_attribute:
+          key: http.status_code
+          min_value: 500
+          max_value: 599
+
+      # (3) Keep every slow trace regardless of status. A request that succeeded in
+      # 4 seconds is still an incident, and it is invisible to a status-based policy.
+      - name: keep-slow
+        type: latency
+        latency:
+          threshold_ms: ${env:TAIL_SAMPLING_SLOW_THRESHOLD_MS}
+
+      # (4) A thin slice of healthy traffic. NOT zero on purpose: a service that
+      # emits no traces when healthy gives you nothing to compare an incident
+      # against, and "is this latency normal?" becomes unanswerable at exactly the
+      # moment you need to answer it. ~5% still discards ~95% of healthy traces.
+      - name: healthy-baseline
+        type: probabilistic
+        probabilistic:
+          sampling_percentage: ${env:TAIL_SAMPLING_BASELINE_PCT}
+
+  # LAST before exporters, always. Placed AFTER tail_sampling so it batches only the
+  # spans that survived the decision -- batching first would frame data that is about
+  # to be discarded.
+  batch:
+    timeout: 5s
+    send_batch_size: 1024
+    send_batch_max_size: 2048
+
+exporters:
+  prometheus_remote_write/victoriametrics:
+    endpoint: http://victoriametrics:8428/api/v1/write
+    tls:
+      insecure: true
+    resource_to_telemetry_conversion:
+      enabled: true
+    target_info:
+      enabled: false
+
+  otlp_http/loki:
+    logs_endpoint: http://loki:3100/otlp/v1/logs
+    tls:
+      insecure: true
+
+  otlp_grpc/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  telemetry:
+    logs:
+      level: warn
+    metrics:
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, tail_sampling, batch]
+      exporters: [otlp_grpc/tempo]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus_remote_write/victoriametrics]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp_http/loki]

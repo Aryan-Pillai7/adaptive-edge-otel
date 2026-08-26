@@ -7,7 +7,7 @@
 
 SHELL := /usr/bin/env bash
 
-.PHONY: help validate lint up down smoke test measure
+.PHONY: help validate lint up down smoke verify gen logs test measure
 
 help:
 	@echo "Targets (each just calls the matching scripts/<name>.sh):"
@@ -16,6 +16,9 @@ help:
 	@echo "  up        - bring the stack up            [Phase 1]"
 	@echo "  down      - tear the stack down           [Phase 1]"
 	@echo "  smoke     - backend readiness checks      [Phase 1]"
+	@echo "  verify    - END-TO-END PIPELINE GATE: prove all 3 signals land"
+	@echo "  gen       - drive synthetic telemetry with telemetrygen"
+	@echo "  logs      - tail stack logs (make logs s=loki)"
 	@echo "  test      - unit + integration tests      [Phase 5]"
 	@echo "  measure   - before/after reduction report [Phase 3]"
 
@@ -24,5 +27,8 @@ lint:     ; @bash scripts/lint.sh
 up:       ; @bash scripts/up.sh
 down:     ; @bash scripts/down.sh
 smoke:    ; @bash scripts/smoke.sh
+verify:   ; @bash scripts/verify-pipeline.sh
+gen:      ; @bash scripts/telemetrygen.sh
+logs:     ; @bash scripts/logs.sh $(s)
 test:     ; @bash scripts/test.sh
 measure:  ; @bash scripts/measure.sh

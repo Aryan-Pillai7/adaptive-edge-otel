@@ -16,9 +16,27 @@ small enough to run in a few hundred megabytes each.
           └── traces ───▶ Tempo
 ```
 
-> **Status: Phase 1 complete.** The storage tier runs and is verified. The Collector
-> joins in Phase 2. The before/after reduction table — the actual point of this
-> project — lands in Phase 4 and will lead this README.
+> **Status: Phase 2 complete — the pipeline works end to end.** All three signals
+> travel app → Collector → their backend and are queryable there. The Collector still
+> runs the *passthrough* config (no sampling, no dedup, no attribute stripping): that
+> is the deliberate "before" baseline. The smart processors, and the before/after
+> reduction table that is the actual point of this project, land in Phase 4.
+
+## Verify it works
+
+```bash
+bash scripts/up.sh                # start the pipeline
+bash scripts/verify-pipeline.sh   # THE GATE: prove all 3 signals reach storage
+```
+
+`verify-pipeline.sh` emits a burst of traces, metrics and logs tagged with a unique
+`run_id`, then queries each backend until it finds them. It asserts on **data**, not
+on process health — a green `smoke.sh` only means the containers are alive. It also
+checks the Collector's own `otelcol_receiver_accepted_*` counters, since the Phase 4
+measurement is read from them.
+
+It is negative-tested: stop a backend and the gate reports that signal missing, runs
+the remaining checks anyway, and exits non-zero.
 
 ## Storage footprint (idle)
 
@@ -67,13 +85,16 @@ Other entrypoints:
 bash scripts/validate.sh      # validate Collector configs against the pinned binary
 bash scripts/lint.sh          # yaml / python / shell checks
 bash scripts/logs.sh loki     # tail logs, optionally for one service
+bash scripts/telemetrygen.sh  # drive synthetic telemetry through the pipeline
 ```
 
 ### Ports
 
 | Port   | Service                                              |
 |--------|------------------------------------------------------|
-| 4317/4318 | Collector OTLP — the only intended telemetry ingress (Phase 2) |
+| 4317/4318 | Collector OTLP — the only intended telemetry ingress |
+| 8888   | Collector self-telemetry (accepted vs sent counters)   |
+| 13133  | Collector health check                                |
 | 8428   | VictoriaMetrics                                       |
 | 3100   | Loki                                                  |
 | 3200   | Tempo **query API only** — its OTLP ports stay network-internal so they don't collide with the Collector |
@@ -84,7 +105,7 @@ bash scripts/logs.sh loki     # tail logs, optionally for one service
 | Path         | What lives there                                          |
 |--------------|-----------------------------------------------------------|
 | `app/`       | Mock microservice (FastAPI + OTel SDK), incl. `/simulate/flood` |
-| `collector/` | Collector configs — the actual subject of this project    |
+| `collector/` | Collector configs — the actual subject of this project. `collector.passthrough.yaml` is the unreduced "before" arm; `collector.yaml` (Phase 4) is the smart one. Switch with `COLLECTOR_CONFIG` in `.env` |
 | `storage/`   | Backend configs: VictoriaMetrics, Loki, Tempo             |
 | `test/`      | Pipeline-level integration + smoke tests                  |
 | `scripts/`   | Canonical dev entrypoints                                 |
@@ -96,7 +117,7 @@ bash scripts/logs.sh loki     # tail logs, optionally for one service
 |-------|---------------------------------------------------------------|--------|
 | 0     | Scaffolding, config validation, CI                            | ✅ |
 | 1     | Storage backends standalone, each under 200MB idle            | ✅ |
-| 2     | Collector plumbing verified end to end with `telemetrygen`    | ⬜ |
+| 2     | Collector plumbing verified end to end with `telemetrygen`    | ✅ |
 | 3     | Real microservice + flood endpoint, **before** baseline       | ⬜ |
 | 4     | Smart processors: tail sampling, cardinality strip, log dedup | ⬜ |
 | 5     | Integration tests + CI hardening                              | ⬜ |

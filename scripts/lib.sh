@@ -72,6 +72,23 @@ ensure_env() {
   if [[ ! -f "$REPO_ROOT/.env" ]]; then
     cp "$REPO_ROOT/.env.example" "$REPO_ROOT/.env"
     info "created .env from .env.example"
+    return
+  fi
+
+  # A .env from an earlier phase can be missing keys added since. Compose expands an
+  # unset ${VAR} to an empty string WITHOUT erroring, which surfaces as a container
+  # started with a blank image tag or a port mapping of ":8428" -- confusing failures
+  # a long way from the real cause. Name the drift instead of letting it be silent.
+  local missing=() key
+  while IFS= read -r key; do
+    [[ -n "$key" ]] || continue
+    grep -qE "^${key}=" "$REPO_ROOT/.env" || missing+=("$key")
+  done < <(sed -nE 's/^([A-Z_][A-Z0-9_]*)=.*/\1/p' "$REPO_ROOT/.env.example")
+
+  if (( ${#missing[@]} )); then
+    warn ".env is missing ${#missing[@]} key(s) present in .env.example:"
+    printf '       %s\n' "${missing[@]}" >&2
+    warn "add them, or delete .env and let it be recreated"
   fi
 }
 

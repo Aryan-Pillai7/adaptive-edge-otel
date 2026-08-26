@@ -226,3 +226,4 @@ decisions.md
 .env
 data/
 .measure/
+.last-run-id

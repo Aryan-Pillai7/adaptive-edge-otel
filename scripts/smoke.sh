@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Readiness + resource budget check for the storage tier.
+# Readiness + resource budget check for the whole pipeline.
 #
 # Two questions, both of which must be yes:
 #   1. Is each backend actually ready to serve? (not just "container running")
@@ -11,8 +11,8 @@
 
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 need docker
-load_env
 ensure_env
+load_env
 
 failed=0
 
@@ -37,6 +37,9 @@ probe() {
 }
 
 info "readiness"
+# The Collector is checked first and deliberately: if it is down, telemetry never
+# reaches the backends and three green backends would be a misleading result.
+probe "collector"       "http://localhost:${COLLECTOR_HEALTH_PORT}/"        ""
 probe "victoriametrics" "http://localhost:${VICTORIAMETRICS_PORT}/health" ""
 probe "loki"            "http://localhost:${LOKI_PORT}/ready"             "ready"
 probe "tempo"           "http://localhost:${TEMPO_QUERY_PORT}/ready"      "ready"
@@ -80,10 +83,11 @@ check_mem() {
   fi
 }
 
+check_mem aeo-collector       "$COLLECTOR_MEM_LIMIT"
 check_mem aeo-victoriametrics "$VM_MEM_LIMIT"
 check_mem aeo-loki            "$LOKI_MEM_LIMIT"
 check_mem aeo-tempo           "$TEMPO_MEM_LIMIT"
 
 echo
 [[ $failed -eq 0 ]] || die "smoke check failed"
-ok "storage tier healthy and within budget"
+ok "pipeline healthy and within budget"

@@ -17,6 +17,47 @@ x-logging: &default-logging
     max-file: "3"
 
 services:
+  # --- the point of the project ------------------------------------------
+  # The only component that accepts telemetry from outside. Everything it forwards
+  # has already been through the processor chain, which is what keeps the backends
+  # below small.
+  collector:
+    image: ${COLLECTOR_IMAGE}
+    container_name: aeo-collector
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol/${COLLECTOR_CONFIG}"]
+    environment:
+      # Referenced as ${env:...} inside the collector config. Kept below
+      # COLLECTOR_MEM_LIMIT so memory_limiter refuses work and backpressures the
+      # sender before Docker OOM-kills the container.
+      COLLECTOR_MEMORY_LIMIT_MIB: ${COLLECTOR_MEMORY_LIMIT_MIB}
+      COLLECTOR_MEMORY_SPIKE_MIB: ${COLLECTOR_MEMORY_SPIKE_MIB}
+      TAIL_SAMPLING_SLOW_THRESHOLD_MS: ${TAIL_SAMPLING_SLOW_THRESHOLD_MS}
+      TAIL_SAMPLING_BASELINE_PCT: ${TAIL_SAMPLING_BASELINE_PCT}
+      TAIL_SAMPLING_DECISION_WAIT: ${TAIL_SAMPLING_DECISION_WAIT}
+    ports:
+      - "${OTLP_GRPC_PORT}:4317"
+      - "${OTLP_HTTP_PORT}:4318"
+      - "${COLLECTOR_METRICS_PORT}:8888"   # self-telemetry: accepted vs sent counters
+      - "${COLLECTOR_HEALTH_PORT}:13133"   # health_check extension, probed host-side
+    volumes:
+      - ./collector/config:/etc/otelcol:ro
+    mem_limit: ${COLLECTOR_MEM_LIMIT}
+    # Wait for the backends: a Collector that starts first will log export failures
+    # and drop the first batches, which looks exactly like a broken pipeline when it
+    # is really just a race at boot.
+    depends_on:
+      - victoriametrics
+      - loki
+      - tempo
+    # No container healthcheck: this image is fully distroless (no shell, no wget,
+    # no curl), so any `test:` here would either fail to exec or amount to running
+    # the binary with --help, which proves nothing about readiness. The health_check
+    # extension is published on 13133 and probed from the host by scripts/smoke.sh
+    # instead -- same approach as VictoriaMetrics, which is distroless for the same
+    # reason.
+    logging: *default-logging
+
   # --- metrics ------------------------------------------------------------
   victoriametrics:
     image: ${VICTORIAMETRICS_IMAGE}

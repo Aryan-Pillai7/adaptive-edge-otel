@@ -1,12 +1,14 @@
-# Passthrough pipeline — Phase 2 plumbing.
+# Passthrough pipeline — the "before" arm.
 #
-# Deliberately DUMB. No sampling, no cardinality stripping, no dedup. Its only job
-# is to prove that telemetry can travel app -> collector -> storage before any smart
-# processing is layered on. It is also the "before" arm of the before/after
-# measurement: whatever this config lets through is the unreduced baseline.
+# Deliberately DUMB: no sampling, no cardinality stripping, no dedup. Two jobs:
 #
-# Phase 0 state: exporters are `debug` only. Phase 2 swaps in the three real
-# backends. Keep this file valid at all times — CI validates it.
+#   1. Prove telemetry can travel app -> collector -> storage at all, before any
+#      smart processing is layered on top (Phase 2, the gate).
+#   2. Serve as the UNREDUCED BASELINE of the before/after measurement. Whatever
+#      this config lets through is the number the smart pipeline has to beat.
+#
+# Because of (2), resist the urge to tidy this up later. Its inefficiency is the
+# control in the experiment.
 
 receivers:
   otlp:
@@ -17,29 +19,72 @@ receivers:
         endpoint: 0.0.0.0:4318
 
 processors:
-  # FIRST in every pipeline, always. memory_limiter can only shed load it sees
-  # before anything else has buffered it; behind a batcher it is decorative.
+  # FIRST in every pipeline, always. memory_limiter can only shed load it sees before
+  # anything else has buffered it; placed behind a batcher it is decorative.
   memory_limiter:
     check_interval: 1s
     limit_mib: ${env:COLLECTOR_MEMORY_LIMIT_MIB}
     spike_limit_mib: ${env:COLLECTOR_MEMORY_SPIKE_MIB}
 
   # LAST before exporters, always. Batching is what makes export compression
-  # worthwhile; anything placed after it would be operating on already-framed data.
+  # worthwhile; anything after it would operate on already-framed data.
   batch:
     timeout: 5s
     send_batch_size: 1024
     send_batch_max_size: 2048
 
 exporters:
-  debug:
-    verbosity: basic
+  # --- metrics -> VictoriaMetrics ----------------------------------------
+  prometheus_remote_write/victoriametrics:
+    endpoint: http://victoriametrics:8428/api/v1/write
+    tls:
+      insecure: true
+    # Promotes OTLP resource attributes to Prometheus labels. Left ON here on
+    # purpose: it is what most people actually deploy, and it is a genuine source of
+    # label cardinality. The "before" arm should be realistically bad, not
+    # artificially clean, or Phase 4 has nothing to improve on.
+    resource_to_telemetry_conversion:
+      enabled: true
+    # Suppresses the synthetic `target_info` series. It carries no signal for this
+    # demo and would otherwise show up in every series count we quote.
+    target_info:
+      enabled: false
+
+  # --- logs -> Loki -------------------------------------------------------
+  # Loki 3.x ingests OTLP natively. The dedicated `loki` exporter is deprecated;
+  # OTLP/HTTP against /otlp/v1/logs is the supported path and keeps log attributes as
+  # structured metadata instead of flattening them into the log line.
+  # Type names note: collector 0.159 renamed these exporters (otlphttp -> otlp_http,
+  # otlp -> otlp_grpc, prometheusremotewrite -> prometheus_remote_write). The old
+  # aliases still resolve but log a deprecation warning on every start.
+  otlp_http/loki:
+    logs_endpoint: http://loki:3100/otlp/v1/logs
+    tls:
+      insecure: true
+
+  # --- traces -> Tempo ----------------------------------------------------
+  # Reached over the compose network. Tempo's OTLP ports are not published to the
+  # host: 4317 there belongs to this Collector, the sole telemetry ingress.
+  otlp_grpc/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+
+extensions:
+  # Gives the container a real readiness signal, so `compose up --wait` and
+  # depends_on mean "the pipeline is accepting data", not merely "the process exists".
+  health_check:
+    endpoint: 0.0.0.0:13133
 
 service:
+  extensions: [health_check]
   telemetry:
+    logs:
+      level: warn
     metrics:
-      # The Collector's own throughput counters. This is how we measure reduction:
-      # accepted vs sent, per signal, across the processor chain.
+      # The Collector's own counters — accepted vs sent, per signal. This is the
+      # instrument the whole before/after measurement is read from, so it is not
+      # optional plumbing.
       readers:
         - pull:
             exporter:
@@ -50,12 +95,12 @@ service:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [debug]
+      exporters: [otlp_grpc/tempo]
     metrics:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [debug]
+      exporters: [prometheus_remote_write/victoriametrics]
     logs:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [debug]
+      exporters: [otlp_http/loki]

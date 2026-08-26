@@ -214,3 +214,56 @@ class TestSamplingPreconditions:
 
     def test_slow_rate_is_non_zero_by_default(self):
         assert Settings().app_slow_rate > 0
+
+
+class TestDeterministicOutcomes:
+    """`?force=` must be reliable — the integration tests depend on it entirely.
+
+    If force stopped working, the tail-sampling integration assertions would go back
+    to being coin flips, and a flaky test gets muted rather than fixed.
+    """
+
+    def test_force_error_always_fails(self, settings: Settings, instruments):
+        """Even with the configured error rate at zero."""
+        app = create_app(
+            Settings(otel_sdk_disabled=True, app_error_rate=0.0, app_slow_rate=0.0),
+            configure_otel=False,
+        )
+        with TestClient(app, raise_server_exceptions=False) as c:
+            c.app.state.instruments = instruments
+            for i in range(5):
+                assert c.get(f"/api/orders/f-{i}?force=error").status_code == 500
+
+    def test_force_slow_always_succeeds_but_slowly(self, instruments):
+        """Slow is not an error: it must still return 200, just over the threshold."""
+        app = create_app(
+            Settings(
+                otel_sdk_disabled=True,
+                app_error_rate=0.0,
+                app_slow_rate=0.0,
+                app_slow_ms=600,
+            ),
+            configure_otel=False,
+        )
+        with TestClient(app) as c:
+            c.app.state.instruments = instruments
+            started = time.perf_counter()
+            resp = c.get("/api/orders/slow-1?force=slow")
+            elapsed_ms = (time.perf_counter() - started) * 1000
+
+        assert resp.status_code == 200
+        assert elapsed_ms >= 600, "force=slow must exceed app_slow_ms"
+
+    def test_no_force_respects_configured_rates(self, instruments):
+        """Without force, a zero error rate must never produce a failure."""
+        app = create_app(
+            Settings(otel_sdk_disabled=True, app_error_rate=0.0, app_slow_rate=0.0),
+            configure_otel=False,
+        )
+        with TestClient(app, raise_server_exceptions=False) as c:
+            c.app.state.instruments = instruments
+            codes = {c.get(f"/api/orders/n-{i}").status_code for i in range(20)}
+        assert codes == {200}
+
+    def test_invalid_force_value_is_rejected(self, client):
+        assert client.get("/api/orders/x?force=banana").status_code == 422

@@ -15,6 +15,7 @@ import logging
 import random
 import time
 import uuid
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from opentelemetry import trace
@@ -63,15 +64,31 @@ async def _simulated_db_query(
 
 
 @router.get("/orders/{order_id}")
-async def get_order(order_id: str, request: Request) -> dict:
+async def get_order(
+    order_id: str,
+    request: Request,
+    force: Literal["error", "slow"] | None = None,
+) -> dict:
+    """Fetch an order. Fails or runs slow at the configured rates.
+
+    `force` makes the outcome deterministic:
+      ?force=error -> always 500
+      ?force=slow  -> always exceeds app_slow_ms
+
+    This exists so the integration tests can assert on tail-sampling behaviour without
+    being flaky. Asserting "the sampler kept this error trace" against a random 5%
+    error rate means the test passes or fails on a coin flip, and a test that fails
+    intermittently gets muted rather than fixed. It is also genuinely useful for
+    demos: it is how you produce an error trace on demand.
+    """
     settings = request.app.state.settings
     instruments: Instruments = request.app.state.instruments
 
     user_id = f"user-{uuid.uuid4().hex}"
     started = time.perf_counter()
 
-    fail = random.random() < settings.app_error_rate
-    slow = random.random() < settings.app_slow_rate
+    fail = force == "error" or (force is None and random.random() < settings.app_error_rate)
+    slow = force == "slow" or (force is None and random.random() < settings.app_slow_rate)
 
     span = trace.get_current_span()
     span.set_attribute("order.id", order_id)

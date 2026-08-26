@@ -1,0 +1,53 @@
+# CI is scoped to checks that would actually have caught a real break.
+#
+# Phase 0 runs lint + Collector config validation only. The value of the second one
+# is specific: a malformed processor config fails at container start, not at commit
+# time, and "the pipeline silently stopped exporting" is the exact failure mode this
+# project exists to prevent. Unit and integration jobs are added in Phase 5 when
+# there is something to run.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A second push should cancel the first run rather than queue behind it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"   # matches the lowest supported local interpreter
+
+      - name: install lint deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyyaml ruff
+          sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: lint
+        run: bash scripts/lint.sh
+
+  collector-config:
+    name: validate collector config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Uses the pinned image from .env.example, so CI validates against exactly the
+      # binary the stack runs. A version bump that breaks a processor fails here.
+      - name: validate
+        run: bash scripts/validate.sh

@@ -1,0 +1,61 @@
+# Passthrough pipeline — Phase 2 plumbing.
+#
+# Deliberately DUMB. No sampling, no cardinality stripping, no dedup. Its only job
+# is to prove that telemetry can travel app -> collector -> storage before any smart
+# processing is layered on. It is also the "before" arm of the before/after
+# measurement: whatever this config lets through is the unreduced baseline.
+#
+# Phase 0 state: exporters are `debug` only. Phase 2 swaps in the three real
+# backends. Keep this file valid at all times — CI validates it.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # FIRST in every pipeline, always. memory_limiter can only shed load it sees
+  # before anything else has buffered it; behind a batcher it is decorative.
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: ${env:COLLECTOR_MEMORY_LIMIT_MIB}
+    spike_limit_mib: ${env:COLLECTOR_MEMORY_SPIKE_MIB}
+
+  # LAST before exporters, always. Batching is what makes export compression
+  # worthwhile; anything placed after it would be operating on already-framed data.
+  batch:
+    timeout: 5s
+    send_batch_size: 1024
+    send_batch_max_size: 2048
+
+exporters:
+  debug:
+    verbosity: basic
+
+service:
+  telemetry:
+    metrics:
+      # The Collector's own throughput counters. This is how we measure reduction:
+      # accepted vs sent, per signal, across the processor chain.
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug]

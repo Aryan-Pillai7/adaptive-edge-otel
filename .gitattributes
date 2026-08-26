@@ -1,0 +1,19 @@
+# Everything in this repo is consumed by Linux containers or by bash. A CRLF line
+# ending inside a mounted shell script fails as `\r: command not found`, and a
+# CRLF Collector config is a confusing parse error. Force LF regardless of the
+# contributor's platform or core.autocrlf setting.
+* text=auto eol=lf
+
+*.sh        text eol=lf
+*.yaml      text eol=lf
+*.yml       text eol=lf
+*.py        text eol=lf
+*.toml      text eol=lf
+Makefile    text eol=lf
+Dockerfile  text eol=lf
+*.md        text eol=lf
+
+# Never touch binaries.
+*.png       binary
+*.jpg       binary
+*.gz        binary

@@ -216,3 +216,13 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# --- adaptive-edge-otel: agent/local working files (never committed) ---
+CLAUDE.md
+plan.md
+decisions.md
+
+# Local compose env + runtime state
+.env
+data/
+.measure/

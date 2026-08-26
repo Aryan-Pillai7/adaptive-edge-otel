@@ -1,0 +1,82 @@
+# Loki — single-binary, filesystem-backed, tuned for a small footprint.
+#
+# Deliberately avoids the microservices topology and every distributed component
+# that comes with it: one process, an in-memory ring, replication factor 1. None of
+# the availability machinery earns its RAM in a single-node pipeline demo, and the
+# point of this project is that the Collector upstream keeps the volume low enough
+# that Loki never needs to scale out.
+
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  # warn, not info: Loki logs a line per flush at info, which is noise that competes
+  # with the telemetry we are actually trying to observe.
+  log_level: warn
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+
+schema_config:
+  configs:
+    # v13 + tsdb is required for structured metadata, which is how OTLP log
+    # attributes are stored natively. On an older schema, attributes coming out of
+    # the Collector would be silently flattened into the log line.
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+storage_config:
+  tsdb_shipper:
+    active_index_directory: /loki/tsdb-index
+    cache_location: /loki/tsdb-cache
+    cache_ttl: 1h
+
+ingester:
+  # Flush early and often. Long-lived in-memory chunks are the single biggest
+  # contributor to Loki's resident memory, and holding them buys nothing here.
+  chunk_idle_period: 2m
+  max_chunk_age: 5m
+  chunk_target_size: 1048576   # 1MB
+
+limits_config:
+  allow_structured_metadata: true
+  volume_enabled: true
+  # Generous enough to absorb the Phase 3 flood WITHOUT rejecting it. Loki must not
+  # be what saves us during the flood -- the Collector is. If Loki starts
+  # rate-limiting, the before/after measurement is measuring the wrong thing.
+  ingestion_rate_mb: 32
+  ingestion_burst_size_mb: 64
+  # The flood generates high-cardinality streams on purpose; don't reject them in the
+  # "before" arm.
+  max_streams_per_user: 10000
+  reject_old_samples: false
+
+query_range:
+  results_cache:
+    cache:
+      embedded_cache:
+        enabled: true
+        max_size_mb: 16   # capped hard; the default would eat the memory budget
+
+compactor:
+  working_directory: /loki/compactor
+  retention_enabled: true
+  delete_request_store: filesystem
+
+analytics:
+  reporting_enabled: false

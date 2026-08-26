@@ -16,9 +16,24 @@ small enough to run in a few hundred megabytes each.
           └── traces ───▶ Tempo
 ```
 
-> **Status: Phase 0 (scaffolding).** The stack does not run yet. See the build plan
-> below. The before/after reduction table — the actual point of this project — lands
-> in Phase 4 and will lead this README.
+> **Status: Phase 1 complete.** The storage tier runs and is verified. The Collector
+> joins in Phase 2. The before/after reduction table — the actual point of this
+> project — lands in Phase 4 and will lead this README.
+
+## Storage footprint (idle)
+
+The whole premise is that backends stay small. Starting point, no telemetry flowing:
+
+| Backend         | Idle RSS    | Budget  |
+|-----------------|-------------|---------|
+| VictoriaMetrics | ~7 MiB      | 200 MiB |
+| Loki            | ~34 MiB     | 200 MiB |
+| Tempo           | ~17 MiB     | 200 MiB |
+| **Total**       | **~58 MiB** | 600 MiB |
+
+`scripts/smoke.sh` re-checks these on every run and **fails if any backend exceeds its
+budget** — an over-budget backend means the pipeline upstream isn't doing its job, so
+it's treated as a test failure rather than a number to quietly raise.
 
 ## Requirements
 
@@ -32,10 +47,37 @@ small enough to run in a few hundred megabytes each.
 ## Quickstart
 
 ```bash
-cp .env.example .env          # every default already works
-bash scripts/validate.sh      # validate Collector configs
-bash scripts/lint.sh          # yaml / python / shell checks
+bash scripts/up.sh            # start the storage tier (.env is created for you)
+bash scripts/smoke.sh         # readiness + memory budget check
+bash scripts/down.sh          # stop, keeping data (--clean also drops volumes)
 ```
+
+With the optional UI:
+
+```bash
+bash scripts/up.sh --profile ui   # adds Grafana on :3000
+```
+
+Grafana is *not* in the default stack — it costs more RAM than any single backend
+here, which cuts against the point. Don't leave it running while measuring.
+
+Other entrypoints:
+
+```bash
+bash scripts/validate.sh      # validate Collector configs against the pinned binary
+bash scripts/lint.sh          # yaml / python / shell checks
+bash scripts/logs.sh loki     # tail logs, optionally for one service
+```
+
+### Ports
+
+| Port   | Service                                              |
+|--------|------------------------------------------------------|
+| 4317/4318 | Collector OTLP — the only intended telemetry ingress (Phase 2) |
+| 8428   | VictoriaMetrics                                       |
+| 3100   | Loki                                                  |
+| 3200   | Tempo **query API only** — its OTLP ports stay network-internal so they don't collide with the Collector |
+| 3000   | Grafana (`--profile ui` only)                         |
 
 ## Layout
 
@@ -53,7 +95,7 @@ bash scripts/lint.sh          # yaml / python / shell checks
 | Phase | Milestone                                                     | Status |
 |-------|---------------------------------------------------------------|--------|
 | 0     | Scaffolding, config validation, CI                            | ✅ |
-| 1     | Storage backends standalone, each under 200MB idle            | ⬜ |
+| 1     | Storage backends standalone, each under 200MB idle            | ✅ |
 | 2     | Collector plumbing verified end to end with `telemetrygen`    | ⬜ |
 | 3     | Real microservice + flood endpoint, **before** baseline       | ⬜ |
 | 4     | Smart processors: tail sampling, cardinality strip, log dedup | ⬜ |

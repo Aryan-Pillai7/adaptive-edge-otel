@@ -1,0 +1,48 @@
+# Tempo — local block storage, single process.
+#
+# Note what is NOT enabled: the metrics_generator. It would derive RED metrics from
+# spans and remote-write them, which is genuinely useful in production but costs
+# meaningful RAM and would muddy this project's thesis -- we want to measure what the
+# Collector reduced, not what Tempo re-derived downstream.
+
+stream_over_http_enabled: true
+
+server:
+  http_listen_port: 3200
+  log_level: warn
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        # Tempo listens on the standard OTLP ports INSIDE the compose network only.
+        # It gets no host port mapping: 4317 on the host belongs to the Collector,
+        # which is the sole intended ingress for telemetry.
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+ingester:
+  # Short blocks keep the write-ahead log and in-memory trace map small, at the cost
+  # of more small blocks on disk. That is the right trade at this scale.
+  max_block_duration: 5m
+  complete_block_timeout: 5m
+
+compactor:
+  compaction:
+    block_retention: 24h
+
+storage:
+  trace:
+    backend: local
+    wal:
+      path: /var/tempo/wal
+    local:
+      path: /var/tempo/blocks
+    pool:
+      max_workers: 10
+      queue_depth: 1000
+
+usage_report:
+  reporting_enabled: false

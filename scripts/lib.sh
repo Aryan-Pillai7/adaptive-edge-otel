@@ -63,3 +63,26 @@ load_env() {
 todo_phase() {
   die "not implemented yet — lands in Phase $1 (see plan.md)"
 }
+
+# --- compose --------------------------------------------------------------
+# Create .env from .env.example on first run. Compose only auto-loads `.env`, so
+# without this every ${VAR} in docker-compose.yml would silently expand to empty --
+# which shows up as a container started with no image tag rather than a clear error.
+ensure_env() {
+  if [[ ! -f "$REPO_ROOT/.env" ]]; then
+    cp "$REPO_ROOT/.env.example" "$REPO_ROOT/.env"
+    info "created .env from .env.example"
+  fi
+}
+
+# Always invoked from the repo root so compose resolves docker-compose.yml, .env and
+# the relative bind-mount paths in it consistently. Overlays are opt-in via
+# COMPOSE_OVERLAYS (space-separated filenames).
+compose() {
+  local args=(-f docker-compose.yml)
+  local overlay
+  for overlay in ${COMPOSE_OVERLAYS:-}; do
+    args+=(-f "$overlay")
+  done
+  ( cd "$REPO_ROOT" && docker compose "${args[@]}" "$@" )
+}

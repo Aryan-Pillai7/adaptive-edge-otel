@@ -1,0 +1,109 @@
+# Base stack. This file must reflect the HONEST resting footprint of the pipeline --
+# load generators live in docker-compose.load.yml and the test harness in
+# docker-compose.test.yml, so that `docker stats` against this file alone is a
+# measurement we can quote.
+#
+# Phase 1 brings up storage only. The Collector joins in Phase 2, the app in Phase 3.
+
+name: adaptive-edge-otel
+
+# Memory limits are enforced, not aspirational: the thesis of this project is that
+# edge processing keeps backends small, so a backend that needs more than its budget
+# is a finding, not a config to loosen.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  # --- metrics ------------------------------------------------------------
+  victoriametrics:
+    image: ${VICTORIAMETRICS_IMAGE}
+    container_name: aeo-victoriametrics
+    restart: unless-stopped
+    command:
+      - --httpListenAddr=:8428
+      - --retentionPeriod=${VM_RETENTION_PERIOD}
+      # VM sizes its caches from available memory. Left alone it would claim ~60% of
+      # the cgroup limit for caches and then get OOM-killed by the remaining
+      # allocation pressure; 40% leaves real headroom under a 200MB ceiling.
+      - --memory.allowedPercent=40
+      - --loggerLevel=WARN
+      # Accept OTLP directly as well as remote-write. Not used by default (the
+      # Collector remote-writes), but it makes the backend swappable later without
+      # touching the pipeline shape.
+      - --opentelemetry.usePrometheusNaming=true
+    ports:
+      - "${VICTORIAMETRICS_PORT}:8428"
+    volumes:
+      - vm-data:/victoria-metrics-data
+    mem_limit: ${VM_MEM_LIMIT}
+    logging: *default-logging
+
+  # --- logs ---------------------------------------------------------------
+  loki:
+    image: ${LOKI_IMAGE}
+    container_name: aeo-loki
+    restart: unless-stopped
+    command: ["-config.file=/etc/loki/loki-config.yaml"]
+    environment:
+      # Go's soft memory limit. Set below mem_limit so the GC works harder as the
+      # heap approaches the ceiling instead of letting Docker hard-kill the process.
+      # Graceful degradation beats an OOM kill in an observability backend -- losing
+      # the thing that tells you what went wrong is the worst possible failure mode.
+      GOMEMLIMIT: 160MiB
+    ports:
+      - "${LOKI_PORT}:3100"
+    volumes:
+      - ./storage/loki/loki-config.yaml:/etc/loki/loki-config.yaml:ro
+      - loki-data:/loki
+    mem_limit: ${LOKI_MEM_LIMIT}
+    logging: *default-logging
+
+  # --- traces -------------------------------------------------------------
+  tempo:
+    image: ${TEMPO_IMAGE}
+    container_name: aeo-tempo
+    restart: unless-stopped
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    environment:
+      GOMEMLIMIT: 160MiB
+    ports:
+      # Query API only. Tempo's OTLP receivers (4317/4318) are deliberately NOT
+      # published -- they would collide with the Collector, which is the only
+      # component that should accept telemetry from outside.
+      - "${TEMPO_QUERY_PORT}:3200"
+    volumes:
+      - ./storage/tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    mem_limit: ${TEMPO_MEM_LIMIT}
+    logging: *default-logging
+
+  # --- optional UI --------------------------------------------------------
+  # Not in the default stack: Grafana costs more RAM than any single backend here,
+  # which cuts directly against the thing this project is demonstrating. Start it
+  # explicitly with `--profile ui`, and never leave it running while measuring.
+  grafana:
+    image: ${GRAFANA_IMAGE}
+    container_name: aeo-grafana
+    restart: unless-stopped
+    profiles: ["ui"]
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    ports:
+      - "${GRAFANA_PORT}:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    depends_on: [victoriametrics, loki, tempo]
+    logging: *default-logging
+
+volumes:
+  vm-data:
+  loki-data:
+  tempo-data:
+  grafana-data:

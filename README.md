@@ -16,11 +16,44 @@ small enough to run in a few hundred megabytes each.
           └── traces ───▶ Tempo
 ```
 
-> **Status: Phase 2 complete — the pipeline works end to end.** All three signals
-> travel app → Collector → their backend and are queryable there. The Collector still
-> runs the *passthrough* config (no sampling, no dedup, no attribute stripping): that
-> is the deliberate "before" baseline. The smart processors, and the before/after
-> reduction table that is the actual point of this project, land in Phase 4.
+> **Status: Phase 3 complete — the workload and the baseline exist.** A real FastAPI
+> service emits all three signals through the Collector, `/simulate/flood` reproduces
+> the incident, and the **"before" numbers are measured and recorded**. The Collector
+> still runs the passthrough config on purpose: that is the control. The smart
+> processors land in Phase 4.
+
+## The "before" baseline
+
+One 30s flood — 500 identical log records/sec plus 200 unique metric label values/sec
+— with 10 req/s of normal traffic alongside it, through the **passthrough** Collector:
+
+| Measure                        | Passthrough (before) |
+|--------------------------------|----------------------|
+| Log records accepted → sent    | 15,232 → 15,232      |
+| Metric points accepted → sent  | 33,549 → 33,549      |
+| Spans accepted → sent          | 1,311 → 1,311        |
+| New metric series in VM        | ~6,500               |
+| ...of which from one label     | ~6,013               |
+| Loki lines stored              | 15,233               |
+| **Reduction**                  | **0.0% on all three** |
+
+Zero reduction is the *correct* result here — passthrough is the control arm. Phase 4
+runs the identical flood through the smart pipeline and fills in the second column.
+
+Reproduce it with `bash scripts/measure.sh`. Numbers agree within ~2% across three
+clean runs; the exact profile they are pinned to is recorded alongside them, because
+a reduction percentage means nothing without the flood that produced it.
+
+### The finding that surprised us
+
+Running the same flood twice in one process reported **34,253** metric points and then
+**120,949**. The SDK uses cumulative temporality, so every export cycle re-sends every
+series the process has ever created — the second flood inherited the first's 6,000
+series and kept re-exporting them every 10 seconds.
+
+High cardinality is not only a storage cost. It **multiplies export volume on every
+interval, for the entire life of the process**. That is the strongest argument for
+killing it at the edge, and it is why `measure.sh` resets the stack before every run.
 
 ## Verify it works
 
@@ -86,6 +119,8 @@ bash scripts/validate.sh      # validate Collector configs against the pinned bi
 bash scripts/lint.sh          # yaml / python / shell checks
 bash scripts/logs.sh loki     # tail logs, optionally for one service
 bash scripts/telemetrygen.sh  # drive synthetic telemetry through the pipeline
+bash scripts/load.sh          # drive steady-state request traffic at the app
+bash scripts/measure.sh       # run a flood and record the reduction numbers
 ```
 
 ### Ports
@@ -98,13 +133,14 @@ bash scripts/telemetrygen.sh  # drive synthetic telemetry through the pipeline
 | 8428   | VictoriaMetrics                                       |
 | 3100   | Loki                                                  |
 | 3200   | Tempo **query API only** — its OTLP ports stay network-internal so they don't collide with the Collector |
+| 8000   | The mock microservice                                 |
 | 3000   | Grafana (`--profile ui` only)                         |
 
 ## Layout
 
 | Path         | What lives there                                          |
 |--------------|-----------------------------------------------------------|
-| `app/`       | Mock microservice (FastAPI + OTel SDK), incl. `/simulate/flood` |
+| `app/`       | Mock microservice (FastAPI + OTel SDK), incl. `/simulate/flood`. Unit tests run without Docker: `pip install -e "app[dev]" && pytest app/tests` |
 | `collector/` | Collector configs — the actual subject of this project. `collector.passthrough.yaml` is the unreduced "before" arm; `collector.yaml` (Phase 4) is the smart one. Switch with `COLLECTOR_CONFIG` in `.env` |
 | `storage/`   | Backend configs: VictoriaMetrics, Loki, Tempo             |
 | `test/`      | Pipeline-level integration + smoke tests                  |
@@ -118,7 +154,7 @@ bash scripts/telemetrygen.sh  # drive synthetic telemetry through the pipeline
 | 0     | Scaffolding, config validation, CI                            | ✅ |
 | 1     | Storage backends standalone, each under 200MB idle            | ✅ |
 | 2     | Collector plumbing verified end to end with `telemetrygen`    | ✅ |
-| 3     | Real microservice + flood endpoint, **before** baseline       | ⬜ |
+| 3     | Real microservice + flood endpoint, **before** baseline       | ✅ |
 | 4     | Smart processors: tail sampling, cardinality strip, log dedup | ⬜ |
 | 5     | Integration tests + CI hardening                              | ⬜ |
 | 6     | Docs and the before/after report                              | ⬜ |

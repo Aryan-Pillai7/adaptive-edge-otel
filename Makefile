@@ -7,7 +7,7 @@
 
 SHELL := /usr/bin/env bash
 
-.PHONY: help validate lint up down smoke verify gen logs test measure
+.PHONY: help validate lint up down smoke verify gen logs load test measure
 
 help:
 	@echo "Targets (each just calls the matching scripts/<name>.sh):"
@@ -20,7 +20,8 @@ help:
 	@echo "  gen       - drive synthetic telemetry with telemetrygen"
 	@echo "  logs      - tail stack logs (make logs s=loki)"
 	@echo "  test      - unit + integration tests      [Phase 5]"
-	@echo "  measure   - before/after reduction report [Phase 3]"
+	@echo "  load      - drive steady-state request traffic"
+	@echo "  measure   - run a flood and record the reduction numbers"
 
 validate: ; @bash scripts/validate.sh
 lint:     ; @bash scripts/lint.sh
@@ -31,4 +32,5 @@ verify:   ; @bash scripts/verify-pipeline.sh
 gen:      ; @bash scripts/telemetrygen.sh
 logs:     ; @bash scripts/logs.sh $(s)
 test:     ; @bash scripts/test.sh
+load:     ; @bash scripts/load.sh
 measure:  ; @bash scripts/measure.sh

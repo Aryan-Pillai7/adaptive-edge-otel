@@ -43,6 +43,7 @@ probe "collector"       "http://localhost:${COLLECTOR_HEALTH_PORT}/"        ""
 probe "victoriametrics" "http://localhost:${VICTORIAMETRICS_PORT}/health" ""
 probe "loki"            "http://localhost:${LOKI_PORT}/ready"             "ready"
 probe "tempo"           "http://localhost:${TEMPO_QUERY_PORT}/ready"      "ready"
+probe "app"             "http://localhost:${APP_PORT}/health"             "ok"
 
 # --- memory budget --------------------------------------------------------
 # Compared against the limits in .env rather than a hardcoded number, so raising a
@@ -83,6 +84,7 @@ check_mem() {
   fi
 }
 
+check_mem aeo-app             "$APP_MEM_LIMIT"
 check_mem aeo-collector       "$COLLECTOR_MEM_LIMIT"
 check_mem aeo-victoriametrics "$VM_MEM_LIMIT"
 check_mem aeo-loki            "$LOKI_MEM_LIMIT"

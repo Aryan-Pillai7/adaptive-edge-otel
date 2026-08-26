@@ -58,6 +58,41 @@ services:
     # reason.
     logging: *default-logging
 
+  # --- the workload ------------------------------------------------------
+  # Emits all three signals through the Collector, never directly to a backend.
+  # /simulate/flood triggers the controlled incident the measurement runs against.
+  app:
+    build:
+      context: ./app
+    image: aeo-edgeapp:local
+    container_name: aeo-app
+    restart: unless-stopped
+    environment:
+      SERVICE_NAME: ${OTEL_SERVICE_NAME}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT}
+      APP_ERROR_RATE: ${APP_ERROR_RATE}
+      APP_LOG_LEVEL: ${APP_LOG_LEVEL}
+      FLOOD_DURATION_SECONDS: ${FLOOD_DURATION_SECONDS}
+      FLOOD_LOGS_PER_SECOND: ${FLOOD_LOGS_PER_SECOND}
+      FLOOD_UNIQUE_LABELS_PER_SECOND: ${FLOOD_UNIQUE_LABELS_PER_SECOND}
+    ports:
+      - "${APP_PORT}:8000"
+    mem_limit: ${APP_MEM_LIMIT}
+    depends_on:
+      - collector
+    healthcheck:
+      # A real readiness check, unlike the distroless services: this image has a
+      # Python interpreter, so it can actually exercise the HTTP endpoint. Without it
+      # `compose up --wait` returns as soon as the container is running, and
+      # measure.sh would start driving load before uvicorn is serving.
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    logging: *default-logging
+
   # --- metrics ------------------------------------------------------------
   victoriametrics:
     image: ${VICTORIAMETRICS_IMAGE}

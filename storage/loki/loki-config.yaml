@@ -66,6 +66,33 @@ limits_config:
   max_streams_per_user: 10000
   reject_old_samples: false
 
+  # --- retention ------------------------------------------------------------
+  # Until now this was unset, so `retention_enabled: true` in the compactor below fell
+  # through to Loki's 744h (31 day) default. That made Loki quietly the LONGEST-lived
+  # backend in a stack whose other two keep 3 days and 24 hours -- the opposite of the
+  # intent, and invisible because nothing states a retention anywhere.
+  #
+  # 72h matches VictoriaMetrics' --retentionPeriod=3d, so the two configurable backends
+  # now agree on what "hot" means. Tempo's 24h block_retention stays the tightest window
+  # in the stack.
+  retention_period: 72h
+
+  # Rolled-up summaries are the cold tier and must OUTLIVE the raw data they came from,
+  # which is the entire point of tiering. They are orders of magnitude smaller, so
+  # keeping them 30x longer costs a fraction of what the raw data does.
+  #
+  # Loki is the only backend here that can express this. VictoriaMetrics OSS has a
+  # single global -retentionPeriod with no per-series override (retention filters are an
+  # enterprise feature), so cold metric rollups written there expire with the raw data.
+  # That is why the durable cold tier lives in Parquet, and these backends hold
+  # queryable projections of it.
+  #
+  # Higher priority wins, and this must outrank the global period above.
+  retention_stream:
+    - selector: '{tier="cold"}'
+      priority: 10
+      period: 2160h    # 90 days, matching the hourly rollup retention downstream
+
 query_range:
   results_cache:
     cache:
